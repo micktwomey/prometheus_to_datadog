@@ -1,0 +1,12 @@
+package: github.com/micktwomey/prometheus_to_datadog
+import:
+- package: github.com/DataDog/datadog-go
+  subpackages:
+  - statsd
+- package: github.com/prometheus/client_golang
+  version: ~0.8.0
+  subpackages:
+  - api/prometheus
+- package: golang.org/x/net
+  subpackages:
+  - context

@@ -1,0 +1,21 @@
+hash: 293cba91e1d22acc87dde72bd1f16a9540f3c1856a559b69069d8ba787dd6275
+updated: 2016-08-21T18:31:32.236634935+01:00
+imports:
+- name: github.com/DataDog/datadog-go
+  version: ""
+  subpackages:
+  - statsd
+- name: github.com/prometheus/client_golang
+  version: ""
+  subpackages:
+  - api/prometheus
+- name: github.com/prometheus/common
+  version: ""
+  subpackages:
+  - model
+- name: golang.org/x/net
+  version: ""
+  subpackages:
+  - context
+  - context/ctxhttp
+testImports: []
