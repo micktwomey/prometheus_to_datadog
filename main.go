@@ -5,10 +5,11 @@ import (
 	"fmt"
 	"github.com/DataDog/datadog-go/statsd"
 	"github.com/prometheus/client_golang/api/prometheus"
+	prometheus_metrics "github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
 	"golang.org/x/net/context"
+	"net/http"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -24,6 +25,7 @@ const (
 
 type Query struct {
 	Type  QueryType
+	Name  string
 	Query string
 }
 
@@ -34,9 +36,10 @@ func (flags *Queries) String() string {
 }
 
 func (flags *Queries) Set(value string) error {
-	parts := strings.SplitN(value, ":", 2)
+	parts := strings.SplitN(value, ":", 3)
 	metric_type := parts[0]
-	prometheus_query := parts[1]
+	metric_name := parts[1]
+	prometheus_query := parts[2]
 
 	var query_type QueryType
 	switch metric_type {
@@ -54,26 +57,56 @@ func (flags *Queries) Set(value string) error {
 		return fmt.Errorf("Can't handle query type %v (%v)", metric_type, value)
 	}
 
-	*flags = append(*flags, Query{Type: query_type, Query: prometheus_query})
+	*flags = append(*flags, Query{Type: query_type, Name: metric_name, Query: prometheus_query})
 	return nil
 }
 
 var (
 	dogstatsd_addr  = flag.String("dogstatsd-address", "127.0.0.1:8125", "The address to send dogstatsd metrics to.")
 	prometheus_addr = flag.String("prometheus-address", "127.0.0.1:9090", "The prometheus address")
+	listen_addr     = flag.String("listen-address", ":9132", "HTTP address to listen on to publish internal metrics.")
 	interval        = flag.Int("interval", 10, "Frequency to query Prometheus (in seconds)")
 	queries         Queries
 )
 
-func run_query(query Query, query_api prometheus.QueryAPI, when time.Time, statsd_client *statsd.Client) {
+var (
+	pushedMetrics = prometheus_metrics.NewCounterVec(
+		prometheus_metrics.CounterOpts{
+			Namespace: "prometheus_to_datadog",
+			Name:      "pushed_metrics_total",
+			Help:      "Number of metrics pushed",
+		},
+		[]string{"prometheus_name", "dogstatsd_name", "metric_type"},
+	)
+	failedQueries = prometheus_metrics.NewCounterVec(
+		prometheus_metrics.CounterOpts{
+			Namespace: "prometheus_to_datadog",
+			Name:      "failed_queries_total",
+			Help:      "Number of failed queries to Prometheus",
+		},
+		[]string{"query"},
+	)
+	failedPushedMetrics = prometheus_metrics.NewCounterVec(
+		prometheus_metrics.CounterOpts{
+			Namespace: "prometheus_to_datadog",
+			Name:      "failed_pushed_metrics_total",
+			Help:      "Number of failed failed metric pushes.",
+		},
+		[]string{"reason"},
+	)
+)
+
+func run_query(query Query, query_api prometheus.QueryAPI, when time.Time, statsd_client *statsd.Client) error {
+	var err error
 	results, err := query_api.Query(context.Background(), query.Query, when)
 	if err != nil {
-		panic(err)
+		failedQueries.WithLabelValues(query.Query).Inc()
+		return err
 	}
 
 	for _, sample := range results.(model.Vector) {
 		var tags []string
-		var name string
+		name := query.Name
 		for label, val := range sample.Metric {
 			switch label {
 			case "__name__":
@@ -82,26 +115,45 @@ func run_query(query Query, query_api prometheus.QueryAPI, when time.Time, stats
 				tags = append(tags, fmt.Sprintf("%s:%s", label, val))
 			}
 		}
+
+		name = strings.TrimSpace(name)
+
+		if name == "" {
+			failedPushedMetrics.WithLabelValues("invalid-name").Inc()
+			return fmt.Errorf("Invalid metric name from %v", query)
+		}
+
+		post_pushed_metric := func(metric_type string) {
+			pushedMetrics.WithLabelValues(name, name, metric_type).Inc()
+		}
+
 		switch query.Type {
 		case Gauge:
-			statsd_client.Gauge(name, float64(sample.Value), tags, 1)
+			err = statsd_client.Gauge(name, float64(sample.Value), tags, 1)
+			post_pushed_metric("gauge")
 		case Counter:
-			statsd_client.Count(name, int64(sample.Value), tags, 1)
+			err = statsd_client.Count(name, int64(sample.Value), tags, 1)
+			post_pushed_metric("counter")
 		case Histogram:
-			statsd_client.Histogram(name, float64(sample.Value), tags, 1)
+			err = statsd_client.Histogram(name, float64(sample.Value), tags, 1)
+			post_pushed_metric("histogram")
 		case Milliseconds:
-			statsd_client.TimeInMilliseconds(name, float64(sample.Value), tags, 1)
+			err = statsd_client.TimeInMilliseconds(name, float64(sample.Value), tags, 1)
+			post_pushed_metric("milliseconds")
 		default:
-			panic(fmt.Errorf("Can't handle %g", query.Type))
+			return fmt.Errorf("Can't handle %g", query.Type)
+		}
+		if err != nil {
+			failedPushedMetrics.WithLabelValues("failed-push").Inc()
+			return err
 		}
 	}
+	return err
 }
 
-func start_querying(wg *sync.WaitGroup, interval time.Duration, queries Queries, query_api prometheus.QueryAPI, statsd_client *statsd.Client) {
-	ticker := time.NewTicker(interval)
-	wg.Add(1)
+func start_querying(ticker *time.Ticker, queries Queries, query_api prometheus.QueryAPI, statsd_client *statsd.Client) {
+
 	go func() {
-		defer wg.Done()
 		for now := range ticker.C {
 			for _, query := range queries {
 				run_query(query, query_api, now, statsd_client)
@@ -110,8 +162,14 @@ func start_querying(wg *sync.WaitGroup, interval time.Duration, queries Queries,
 	}()
 }
 
+func init() {
+	prometheus_metrics.MustRegister(pushedMetrics)
+	prometheus_metrics.MustRegister(failedQueries)
+	prometheus_metrics.MustRegister(failedPushedMetrics)
+}
+
 func main() {
-	flag.Var(&queries, "query", "Prometheus query (in form gauge:myquery{}). Can be specified multiple times.")
+	flag.Var(&queries, "query", "Prometheus query (in form type:datadog_metric_name:prometheus_query). Can be specified multiple times.")
 	flag.Parse()
 
 	statsd_client, err := statsd.New(*dogstatsd_addr)
@@ -131,7 +189,9 @@ func main() {
 	prometheus_query_api := prometheus.NewQueryAPI(prometheus_client)
 
 	duration := time.Duration(*interval) * time.Second
-	var wg sync.WaitGroup
-	start_querying(&wg, duration, queries, prometheus_query_api, statsd_client)
-	wg.Wait()
+	ticker := time.NewTicker(duration)
+	start_querying(ticker, queries, prometheus_query_api, statsd_client)
+
+	http.Handle("/metrics", prometheus_metrics.Handler())
+	http.ListenAndServe(*listen_addr, nil)
 }
