@@ -5,3 +5,4 @@ prometheus.address: http://127.0.0.1:9090
 prometheus_to_datadog.query_interval: 10 # seconds
 prometheus_to_datadog.namespace: prometheus
 prometheus_to_datadog.listen_address: :9132
+prometheus_to_datadog.query_file_path: config/queries.yaml

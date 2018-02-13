@@ -172,7 +172,7 @@ func main() {
 	ticker := time.NewTicker(queryInterval)
 
 	// Load queries
-	queryFile, err := ioutil.ReadFile("config/queries.yaml")
+	queryFile, err := ioutil.ReadFile(viper.GetString("prometheus_to_datadog.query_file_path"))
 	if err != nil {
 		panic(fmt.Errorf("Fatal error queries file: %s \n", err))
 	}
