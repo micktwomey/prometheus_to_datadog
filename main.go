@@ -80,12 +80,7 @@ func runQuery(query Query, queryAPI prometheus.QueryAPI, when time.Time, statsdC
 		var tags []string
 		name := query.Name
 		for label, val := range sample.Metric {
-			switch label {
-			case "__name__":
-				name = string(val)
-			default:
-				tags = append(tags, fmt.Sprintf("%s:%s", label, val))
-			}
+			tags = append(tags, fmt.Sprintf("%s:%s", label, val))
 		}
 
 		name = strings.TrimSpace(name)
